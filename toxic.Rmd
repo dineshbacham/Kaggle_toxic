@@ -1,0 +1,145 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Features to be considered:
+
+Presense and count of curse words
+Number of works in the commnet
+
+
+
+<!-- Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*.  -->
+
+```{r}
+# setwd('Data/')
+train = read.csv('Data/train.csv', stringsAsFactors = F)
+test = read.csv('Data/test.csv', stringsAsFactors = F)
+head(train$comment_text)
+```
+
+<!-- Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*. -->
+
+
+```{r}
+library(rJava)
+library(openNLP)
+library(NLP)
+train$comment_text[1]
+temp = as.String(train$comment_text[1])
+sent_token = Maxent_Sent_Token_Annotator()
+word_token = Maxent_Word_Token_Annotator()
+a2 = annotate(temp, list(sent_token, word_token))
+pos_tag = Maxent_POS_Tag_Annotator()
+
+```
+
+
+
+
+```{r}
+library(h2o)
+library(data.table)
+h2o.init(nthreads = -1)
+train = as.data.table(train)
+test = as.data.table(test)
+train[,filter:="Train"]
+test[,filter:="Test"]
+
+dataset <- rbindlist(list(train, test), fill=TRUE)
+dataset[,":="(comment_text=gsub("'|\"|'|“|”|\"|\n|,|\\.|…|\\?|\\+|\\-|\\/|\\=|\\(|\\)|‘", "", comment_text))]
+dataset[,":="(comment_text=gsub("  ", " ", comment_text))]
+
+print("Convert to H2O Frame")
+comments <- data.table(comments=dataset[,comment_text])
+comments.hex <- as.h2o(comments, destination_frame = "comments.hex", col.types=c("String"))
+
+STOP_WORDS = c("ax","i","you","edu","s","t","m","subject","can","lines","re","what",
+               "there","all","we","one","the","a","an","of","or","in","for","by","on",
+               "but","is","in","a","not","with","as","was","if","they","are","this","and","it","have",
+               "from","at","my","be","by","not","that","to","from","com","org","like","likes","so")
+
+tokenize <- function(sentences, stop.words = STOP_WORDS) {
+  tokenized <- h2o.tokenize(sentences, "\\\\W+")
+  
+  # convert to lower case
+  tokenized.lower <- h2o.tolower(tokenized)
+  # remove short words (less than 2 characters)
+  tokenized.lengths <- h2o.nchar(tokenized.lower)
+  tokenized.filtered <- tokenized.lower[is.na(tokenized.lengths) || tokenized.lengths >= 2,]
+  # remove words that contain numbers
+  tokenized.words <- tokenized.lower[h2o.grep("[0-9]", tokenized.lower, invert = TRUE, output.logical = TRUE),]
+  
+  # remove stop words
+  tokenized.words[is.na(tokenized.words) || (! tokenized.words %in% STOP_WORDS),]
+}
+
+print("Break comments into sequence of words")
+words <- tokenize(comments.hex$comments)
+
+print("Build word2vec model")
+vectors <- 20 # Only 10 vectors to save time & memory
+w2v.model <- h2o.word2vec(words
+                          , model_id = "w2v_model"
+                          , vec_size = vectors
+                          , min_word_freq = 5
+                          , window_size = 5
+                          , init_learning_rate = 0.025
+                          , sent_sample_rate = 0
+                          , epochs = 5) # only a one epoch to save time
+
+h2o.rm('comments.hex') # no longer needed
+
+print("Sanity check - find synonyms for the word 'water'")
+print(h2o.findSynonyms(w2v.model, "water", count = 5))
+
+print("Get vectors for each comment")
+comment_all.vecs <- h2o.transform(w2v.model, words, aggregate_method = "AVERAGE")
+
+print("Convert to data.table & merge results")
+# Could do the rest of these steps in H2O but I'm a data.table addict
+comments_all.vecs <- as.data.table(comment_all.vecs)
+comments_all <- cbind(comments, comments_all.vecs)
+dataset <- merge(dataset, comments_all, by.x="comment_text", by.y="comments", all.x=TRUE, sort=FALSE)
+# colnames(dataset)[10:ncol(dataset)] <- paste0("comment_vec_C", 1:vectors)
+# colsToRemove = colnames(dataset)[30:ncol(dataset)]
+# dataset[ , (colsToRemove):=NULL]
+# Run logistic regression for each model
+class(dataset$toxic)
+features = colnames(dataset)[10:ncol(dataset)]
+f = paste0("toxic~", paste0(features, collapse = "+"))
+trainData = dataset[dataset$filter == "Train", ]
+toxicModel = glm(f, data = trainData, family = binomial(link = "probit"))
+f = paste0("severe_toxic~", paste0(features, collapse = "+"))
+stoxicModel = glm(f, data = trainData, family = binomial(link = "probit"))
+f = paste0("obscene~", paste0(features, collapse = "+"))
+obsModel = glm(f, data = trainData, family = binomial(link = "probit"))
+f = paste0("threat~", paste0(features, collapse = "+"))
+threatModel = glm(f, data = trainData, family = binomial(link = "probit"))
+f = paste0("insult~", paste0(features, collapse = "+"))
+insultModel = glm(f, data = trainData, family = binomial(link = "probit"))
+f = paste0("identity_hate~", paste0(features, collapse = "+"))
+identModel = glm(f, data = trainData, family = binomial(link = "probit"))
+
+# Run analytics on features vs y variable
+
+
+
+
+# Predict on the test set
+
+
+
+# Calculate loss/criteria
+
+LogLossBinary = function(actual, predicted, eps = 1e-15) {
+ predicted = pmin(pmax(predicted, eps), 1-eps)
+ - (sum(actual * log(predicted) + (1 - actual) * log(1 - predicted))) / length(actual)
+ }
+
+```LogLossBinary = function(actual, predicted, eps = 1e-15) {
+ predicted = pmin(pmax(predicted, eps), 1-eps)
+ - (sum(actual * log(predicted) + (1 - actual) * log(1 - predicted))) / length(actual)
+ }
+
